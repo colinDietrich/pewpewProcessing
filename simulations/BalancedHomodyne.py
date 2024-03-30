@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import scipy.constants as constants
+import csv
 
 class BalancedHomodyne:
     """
@@ -188,7 +189,8 @@ class BalancedHomodyne:
         # Calculate mode volume and quantum noise level
         omega = 2 * np.pi * constants.c / self.central_wavelength
         mode_volume = self.cross_area * self.central_wavelength
-        quantum_noise = np.sqrt(average_photons_per_pulse)
+        nois_amplitude = np.sqrt(average_photons_per_pulse)
+        quantum_noise = np.random.uniform(-nois_amplitude/2, nois_amplitude/2, len(pulse_with_noise[noise_indices]))
 
         # Add quantum noise within the specified time window
         pulse_with_noise[noise_indices] += (1 + quantum_noise) * np.exp(1j * quantum_noise)
@@ -301,6 +303,58 @@ class BalancedHomodyne:
         detector_output += electric_noise
 
         return detector_output
+    
+    def perform_multiple_measurements(self, N, delay=0, file_path="data/waveform_data_"):
+        """
+        Perform N measurements, generating a new signal and LO pulse for each measurement,
+        and computing the detector signal. Returns concatenated detector signals and a
+        corresponding time array.
+
+        Parameters:
+            N (int): The number of measurements to perform.
+            delay (float, optional): Delay to apply to the pulse in seconds. Default is 0.
+            file_path (str): Path to the CSV file where the data will be saved.
+
+        Returns:
+            tuple: Two arrays, the first concatenating all the detector signal measurements,
+                and the second being the corresponding time array adjusted for N measurements.
+        """
+        # Initialize an empty array for concatenated detector signals
+        concatenated_detector_signals = np.array([])
+
+        # For each measurement
+        for i in range(N):
+            # Generate a new signal and LO pulse
+            signal_pulse = self.coherent_pulse('signal')
+            lo_pulse = self.coherent_pulse('lo', delay=delay)
+
+            # Generate the detector signal for the current pair of signal and LO pulses
+            detector_signal = self.balanced_homodyne_detection(signal_pulse, lo_pulse)
+
+            # Concatenate the current detector signal to the cumulative array
+            concatenated_detector_signals = np.concatenate((concatenated_detector_signals, detector_signal))
+
+        # Generate the corresponding time array
+        # Note: time_grid is centered around 0, but we want to start from 0 for the first measurement
+        # and extend to N * time_window for the last measurement.
+        measurement_duration = self.time_grid[-1] - self.time_grid[0]  # Duration of one measurement
+        concatenated_time_array = np.linspace(0, N * measurement_duration, len(concatenated_detector_signals))
+
+        # Open the file in write mode
+        file_path = file_path + str(delay*constants.c) + ".csv"
+        with open(file_path, 'w', newline='') as csvfile:
+            csvwriter = csv.writer(csvfile)
+
+            # Write the header
+            csvwriter.writerow(['date', '\'30 MAR 2024\''])
+            csvwriter.writerow(['time', '\'14:51:40:25\''])
+            csvwriter.writerow(['Time (SECOND)', 'Voltage (VOLT)'])
+
+            # Write the time and detector values
+            for time, signal in zip(concatenated_time_array, concatenated_detector_signals):
+                csvwriter.writerow([time, signal])
+
+        return concatenated_detector_signals, concatenated_time_array
     
     def plot_pulses(self, signal_pulse, lo_pulse, detector_output):
         """
