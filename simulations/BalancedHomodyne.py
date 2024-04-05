@@ -167,6 +167,34 @@ class BalancedHomodyne:
 
         return distortion_factor
 
+    def apply_gdd_to_pulse(self, pulse, gdd_fs2):
+        """
+        Apply group delay dispersion (GDD) to a pulse.
+
+        Parameters:
+            pulse (np.ndarray): The pulse to which GDD is to be applied.
+            gdd_fs2 (float): The amount of GDD in femtoseconds squared.
+
+        Returns:
+            np.ndarray: The pulse with applied GDD.
+        """
+        # Calculate central angular frequency
+        omega_0 = 2 * np.pi * constants.c / self.central_wavelength
+
+        # Apply FFT to the pulse and create a frequency array
+        E_w = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(pulse)))
+        freqs = np.fft.fftshift(np.fft.fftfreq(self.time_grid.size, d=self.time_grid[1] - self.time_grid[0]))
+        omega = 2 * np.pi * freqs
+
+        # Calculate phase shift due to GDD and apply it to the pulse in frequency domain
+        phase_shift = 0.5 * gdd_fs2 * 1e-30 * (omega - omega_0) ** 2
+        E_w_gdd = E_w * np.exp(1j * phase_shift)
+
+        # Apply inverse FFT to get the pulse with applied GDD in time domain
+        E_t_gdd = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(E_w_gdd)))
+
+        return E_t_gdd
+    
     def add_quantum_noise(self, pulse, delay, time_window, average_photons_per_pulse):
         """
         Add quantum noise to a pulse within a specified time window centered around a delay.
@@ -196,36 +224,53 @@ class BalancedHomodyne:
         pulse_with_noise[noise_indices] += (1 + quantum_noise) * np.exp(1j * quantum_noise)
 
         return pulse_with_noise
+    
+    def add_quantum_noise_squeezed(self, pulse, delay, time_window, average_photons_per_pulse, r=1.7269, theta=0):
+        # Add quantum noise to a pulse for a squeezed state
+        # 'r' is the squeezing parameter, 'theta' is the squeezing angle
 
-    def apply_gdd_to_pulse(self, pulse, gdd_fs2):
-        """
-        Apply group delay dispersion (GDD) to a pulse.
+        # Copy the pulse to avoid modifying the original
+        pulse_with_noise = np.copy(pulse)
 
-        Parameters:
-            pulse (np.ndarray): The pulse to which GDD is to be applied.
-            gdd_fs2 (float): The amount of GDD in femtoseconds squared.
+        # Find indices within the specified time window
+        noise_indices = np.where(np.abs(self.time_grid - delay) <= time_window / 2)[0]
+        length = len(pulse_with_noise[noise_indices])
 
-        Returns:
-            np.ndarray: The pulse with applied GDD.
-        """
-        # Calculate central angular frequency
-        omega_0 = 2 * np.pi * constants.c / self.central_wavelength
+        noise_amplitude = np.sqrt(average_photons_per_pulse)
+        
+        # Generate noise for X1 and X2 quadratures
+        noise_X1 = np.random.normal(0, np.sqrt(0.25 * np.exp(-2 * r)), length)
+        noise_X2 = np.random.normal(0, np.sqrt(0.25 * np.exp(2 * r)), length)
 
-        # Apply FFT to the pulse and create a frequency array
-        E_w = np.fft.fftshift(np.fft.fft(np.fft.ifftshift(pulse)))
-        freqs = np.fft.fftshift(np.fft.fftfreq(self.time_grid.size, d=self.time_grid[1] - self.time_grid[0]))
-        omega = 2 * np.pi * freqs
+        # Rotate noise according to the squeezing angle
+        noise_real = noise_amplitude * (noise_X1 * np.cos(theta) - noise_X2 * np.sin(theta))
+        noise_imag = noise_amplitude * (noise_X1 * np.sin(theta) + noise_X2 * np.cos(theta))
 
-        # Calculate phase shift due to GDD and apply it to the pulse in frequency domain
-        phase_shift = 0.5 * gdd_fs2 * 1e-30 * (omega - omega_0) ** 2
-        E_w_gdd = E_w * np.exp(1j * phase_shift)
+        # Add noise to the pulse
+        pulse_with_noise[noise_indices] += (noise_real + 1j * noise_imag)
 
-        # Apply inverse FFT to get the pulse with applied GDD in time domain
-        E_t_gdd = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(E_w_gdd)))
+        return pulse_with_noise
 
-        return E_t_gdd
+    def add_quantum_noise_fock(self, pulse, delay, time_window):
+        # Add quantum phase noise to a pulse for a Fock state
+        # Phase noise due to fixed photon number
 
-    def coherent_pulse(self, field, delay=0, gdd_fs2=0, distortion=False, loss_per_s=0, offset_loss=0, distortion_bandwidth=0):
+        # Copy the pulse to avoid modifying the original
+        pulse_with_noise = np.copy(pulse)
+
+        # Find indices within the specified time window
+        noise_indices = np.where(np.abs(self.time_grid - delay) <= time_window / 2)[0]
+        length = len(pulse_with_noise[noise_indices])
+        
+        # Phase noise is uniformly distributed due to uncertainty principle
+        phase_noise = np.random.uniform(-np.pi, np.pi, length)
+
+        # Apply phase noise to the pulse
+        pulse_with_noise[noise_indices] *= np.exp(1j * phase_noise)
+
+        return pulse_with_noise
+
+    def coherent_pulse(self, field, delay=0, gdd_fs2=0, distortion=False, loss_per_s=0, offset_loss=0, distortion_bandwidth=0, option="coherent"):
         """
         Generate a coherent pulse with optional modifications such as GDD, spectral distortion, and loss.
 
@@ -275,7 +320,12 @@ class BalancedHomodyne:
             pulse = np.copy(self.distort_pulse_spectrum(self.time_grid, pulse, self.central_wavelength, distortion_bandwidth, self.random_distortion))
 
         # Add quantum noise to the pulse
-        pulse = np.copy(self.add_quantum_noise(pulse, delay, 5*temporal_width, average_photons_per_pulse))
+        if(option == "coherent"):
+            pulse = np.copy(self.add_quantum_noise(pulse, delay, 5*temporal_width, average_photons_per_pulse))
+        elif(option == "squeezed"):
+            pulse = np.copy(self.add_quantum_noise_squeezed(pulse, delay, 5*temporal_width, average_photons_per_pulse))
+        elif(option == "fock"):
+            pulse = np.copy(self.add_quantum_noise_fock(pulse, delay, 5*temporal_width))
 
         return pulse
 
@@ -304,7 +354,7 @@ class BalancedHomodyne:
 
         return detector_output
     
-    def perform_multiple_measurements(self, N, delay=0, file_path="data/waveform_data_"):
+    def perform_multiple_measurements(self, N, number, delay=0, file_path="data/waveform_data_", option="coherent"):
         """
         Perform N measurements, generating a new signal and LO pulse for each measurement,
         and computing the detector signal. Returns concatenated detector signals and a
@@ -312,6 +362,7 @@ class BalancedHomodyne:
 
         Parameters:
             N (int): The number of measurements to perform.
+            number (int): The number of the file being stored.
             delay (float, optional): Delay to apply to the pulse in seconds. Default is 0.
             file_path (str): Path to the CSV file where the data will be saved.
 
@@ -325,8 +376,8 @@ class BalancedHomodyne:
         # For each measurement
         for i in range(N):
             # Generate a new signal and LO pulse
-            signal_pulse = self.coherent_pulse('signal')
-            lo_pulse = self.coherent_pulse('lo', delay=delay)
+            signal_pulse = self.coherent_pulse('signal', option=option)
+            lo_pulse = self.coherent_pulse('lo', delay=delay, option="coherent")
 
             # Generate the detector signal for the current pair of signal and LO pulses
             detector_signal = self.balanced_homodyne_detection(signal_pulse, lo_pulse)
@@ -341,13 +392,14 @@ class BalancedHomodyne:
         concatenated_time_array = np.linspace(0, N * measurement_duration, len(concatenated_detector_signals))
 
         # Open the file in write mode
-        file_path = file_path + str(delay*constants.c) + ".csv"
+        file_path = file_path + str(number) + ".csv"
         with open(file_path, 'w', newline='') as csvfile:
             csvwriter = csv.writer(csvfile)
 
             # Write the header
             csvwriter.writerow(['date', '\'30 MAR 2024\''])
             csvwriter.writerow(['time', '\'14:51:40:25\''])
+            csvwriter.writerow(['opd', f"{delay*constants.c}"])
             csvwriter.writerow(['Time (SECOND)', 'Voltage (VOLT)'])
 
             # Write the time and detector values
@@ -397,7 +449,7 @@ class BalancedHomodyne:
         plt.ylim(-np.max(lo_pulse)**2, np.max(lo_pulse)**2)
         plt.show()
 
-    def animate_pulses(self, optical_path_difference):
+    def animate_pulses(self, optical_path_difference, option="coherent"):
         """
         Create an animation of the signal and LO pulses, and the balanced homodyne detection output as the optical
         path difference (OPD) is varied.
@@ -438,8 +490,8 @@ class BalancedHomodyne:
             delay = opd / constants.c  # Convert OPD to delay in seconds
 
             # Generate signal and LO pulses with the current phase shift applied to the LO
-            signal_pulse = self.coherent_pulse('signal')
-            lo_pulse = self.coherent_pulse('lo', delay=delay)
+            signal_pulse = self.coherent_pulse('signal', option=option)
+            lo_pulse = self.coherent_pulse('lo', delay=delay, option="coherent")
             detector_output = self.balanced_homodyne_detection(signal_pulse, lo_pulse)
 
             # Update the plots with the new pulses and detector output
